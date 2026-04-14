@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.maniparena_policy as maniparena_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -32,6 +33,7 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[4]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,6 +67,8 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Optional local dataset root for loading LeRobot data directly from disk.
+    repo_root: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -759,6 +763,138 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_maniparena_ee",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=SimpleDataConfig(
+            repo_id="put_blocks_to_color",
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="ee")],
+                outputs=[maniparena_policy.ManipArenaOutputs()],
+            ).push(
+                inputs=[_transforms.DeltaActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+            ),
+            base_config=DataConfig(
+                repo_root="/mnt/data/haoliang/maniparena/sim/put_blocks_to_color",
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/models/haoliang/CVPR2026-Workshop/openpi/checkpoints/pi05_base/params"
+        ),
+        assets_base_dir=str(WORKSPACE_ROOT / "assets"),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_maniparena_joints",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=SimpleDataConfig(
+            repo_id="put_blocks_to_color",
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="joints")],
+                outputs=[maniparena_policy.ManipArenaOutputs()],
+            ).push(
+                inputs=[_transforms.DeltaActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+            ),
+            base_config=DataConfig(
+                repo_root="/mnt/data/haoliang/maniparena/sim/put_blocks_to_color",
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/models/haoliang/CVPR2026-Workshop/openpi/checkpoints/pi05_base/params"
+        ),
+        assets_base_dir=str(WORKSPACE_ROOT / "assets"),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # ManipArena config using the pre-trained pi05 LIBERO checkpoint.
+    #
+    TrainConfig(
+        name="pi05_libero_maniparena",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=SimpleDataConfig(
+            repo_id="maniparena",
+            assets=AssetsConfig(
+                assets_dir=str(WORKSPACE_ROOT / "assets" / "pi05_maniparena_ee"),
+                asset_id="put_blocks_to_color",
+            ),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="ee")],
+                outputs=[maniparena_policy.ManipArenaOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
         num_train_steps=30_000,
     ),
     #

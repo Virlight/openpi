@@ -14,6 +14,8 @@ import torch
 import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
+from openpi.training import local_lerobot_dataset as _local_lerobot_dataset
+from openpi.training import local_lerobot_metadata as _local_lerobot_metadata
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
@@ -137,13 +139,24 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
-    )
+    if data_config.repo_root is not None:
+        _local_lerobot_metadata.ensure_local_episodes_stats(repo_id, data_config.repo_root)
+        dataset_meta = _local_lerobot_dataset.load_local_lerobot_metadata(repo_id, data_config.repo_root)
+        dataset = _local_lerobot_dataset.LocalLeRobotDataset(
+            dataset_meta,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
+    else:
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.repo_root)
+        dataset = lerobot_dataset.LeRobotDataset(
+            data_config.repo_id,
+            root=data_config.repo_root,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
