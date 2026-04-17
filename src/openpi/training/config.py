@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import dataclasses
 import difflib
 import logging
+import os
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
 
@@ -100,6 +101,11 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
+
+    # Multi-dataset mode: list of (repo_id, repo_root) pairs.
+    # When non-empty, repo_root should be None and these entries are concatenated as the dataset.
+    # repo_id on this DataConfig is still used as the norm stats asset_id.
+    extra_repos: tuple[tuple[str, str], ...] = ()
 
 
 class GroupFactory(Protocol):
@@ -226,6 +232,46 @@ class SimpleDataConfig(DataConfigFactory):
             self.create_base_config(assets_dirs, model_config),
             data_transforms=self.data_transforms(model_config),
             model_transforms=self.model_transforms(model_config),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class MultiSimpleDataConfig(DataConfigFactory):
+    """Train on multiple local LeRobot datasets simultaneously (concatenated).
+
+    repo_id is used as the norm-stats asset_id (e.g. "maniparena_all_ee").
+    all_repos is a tuple of (repo_id, repo_root) pairs, one per task dataset.
+    The datasets are concatenated for both norm-stats computation and training.
+    """
+
+    # Used only as the norm-stats asset_id; not a real HuggingFace repo.
+    repo_id: str = tyro.MISSING
+    # All task datasets: (task_repo_id, local_repo_root)
+    all_repos: tyro.conf.Suppress[tuple[tuple[str, str], ...]] = ()
+    # Factory for the data transforms (applied identically to every sub-dataset).
+    data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=GroupFactory)
+    # Factory for the model transforms.
+    model_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=ModelTransformFactory)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Use the first sub-dataset entry as the primary repo so create_base_config
+        # can look up the norm stats under self.repo_id.
+        base = dataclasses.replace(
+            self.base_config or DataConfig(),
+            repo_id=self.repo_id,
+            repo_root=None,  # No primary root; datasets come from extra_repos.
+            asset_id=self.repo_id,
+            norm_stats=self._load_norm_stats(
+                epath.Path(self.assets.assets_dir or assets_dirs), self.repo_id
+            ),
+            use_quantile_norm=model_config.model_type != ModelType.PI0,
+        )
+        return dataclasses.replace(
+            base,
+            data_transforms=self.data_transforms(model_config),
+            model_transforms=self.model_transforms(model_config),
+            extra_repos=self.all_repos,
         )
 
 
@@ -772,8 +818,47 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ),
-        data=SimpleDataConfig(
-            repo_id="put_blocks_to_color",
+        data=MultiSimpleDataConfig(
+            # Used as the norm-stats asset_id for the combined dataset.
+            repo_id="maniparena_all_ee",
+            # All 5 task datasets. Paths are read from MANIPARENA_MOUNT_POINT (default /tmp/maniparena_data).
+            all_repos=(
+                (
+                    "pick_fruits_into_basket",
+                    os.path.join(
+                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        "sim/pick_fruits_into_basket",
+                    ),
+                ),
+                (
+                    "press_button_in_order",
+                    os.path.join(
+                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        "sim/press_button_in_order",
+                    ),
+                ),
+                (
+                    "put_blocks_to_color",
+                    os.path.join(
+                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        "sim/put_blocks_to_color",
+                    ),
+                ),
+                (
+                    "put_ring_onto_rod",
+                    os.path.join(
+                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        "real/execution_reasoning/put_ring_onto_rod",
+                    ),
+                ),
+                (
+                    "put_spoon_to_bowl",
+                    os.path.join(
+                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        "real/execution_reasoning/put_spoon_to_bowl",
+                    ),
+                ),
+            ),
             data_transforms=lambda model: _transforms.Group(
                 inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="ee")],
                 outputs=[maniparena_policy.ManipArenaOutputs()],
@@ -782,7 +867,6 @@ _CONFIGS = [
                 outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
             ),
             base_config=DataConfig(
-                repo_root="/mnt/data/haoliang/maniparena/sim/put_blocks_to_color",
                 prompt_from_task=True,
                 action_sequence_keys=("action",),
                 repack_transforms=_transforms.Group(
@@ -801,9 +885,13 @@ _CONFIGS = [
                 ),
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/mnt/models/haoliang/CVPR2026-Workshop/openpi/checkpoints/pi05_base/params"
-        ),
+        # weight_loader=weight_loaders.CheckpointWeightLoader(
+        #     os.environ.get(
+        #         "PI05_BASE_CHECKPOINT",
+        #         "/home/atuin/v120bb/v120bb16/ckpt/pi05_base/params",
+        #     )
+        # ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         assets_base_dir=str(WORKSPACE_ROOT / "assets"),
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
@@ -829,7 +917,10 @@ _CONFIGS = [
                 outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
             ),
             base_config=DataConfig(
-                repo_root="/mnt/data/haoliang/maniparena/sim/put_blocks_to_color",
+                repo_root=os.environ.get(
+                    "MANIPARENA_DATA_ROOT",
+                    "/tmp/maniparena_data/sim/put_blocks_to_color",
+                ),
                 prompt_from_task=True,
                 action_sequence_keys=("action",),
                 repack_transforms=_transforms.Group(
@@ -849,7 +940,10 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/mnt/models/haoliang/CVPR2026-Workshop/openpi/checkpoints/pi05_base/params"
+            os.environ.get(
+                "PI05_BASE_CHECKPOINT",
+                "/home/atuin/v120bb/v120bb16/ckpt/pi05_base/params",
+            )
         ),
         assets_base_dir=str(WORKSPACE_ROOT / "assets"),
         freeze_filter=pi0_config.Pi0Config(

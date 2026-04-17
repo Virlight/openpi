@@ -129,6 +129,27 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _create_single_local_dataset(
+    repo_id: str,
+    repo_root: str,
+    action_horizon: int,
+    action_sequence_keys: _config.Sequence[str],
+    prompt_from_task: bool,
+) -> Dataset:
+    """Load one local LeRobot dataset and optionally inject task prompts."""
+    _local_lerobot_metadata.ensure_local_episodes_stats(repo_id, repo_root)
+    dataset_meta = _local_lerobot_dataset.load_local_lerobot_metadata(repo_id, repo_root)
+    dataset: Dataset = _local_lerobot_dataset.LocalLeRobotDataset(
+        dataset_meta,
+        delta_timestamps={
+            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in action_sequence_keys
+        },
+    )
+    if prompt_from_task:
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+    return dataset
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -138,6 +159,25 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+
+    # Multi-dataset mode: concatenate all sub-datasets from extra_repos.
+    if data_config.extra_repos:
+        sub_datasets = [
+            _create_single_local_dataset(
+                sub_repo_id,
+                sub_repo_root,
+                action_horizon,
+                data_config.action_sequence_keys,
+                data_config.prompt_from_task,
+            )
+            for sub_repo_id, sub_repo_root in data_config.extra_repos
+        ]
+        logging.info(
+            "Multi-dataset mode: concatenating %d datasets (%s)",
+            len(sub_datasets),
+            ", ".join(r for r, _ in data_config.extra_repos),
+        )
+        return torch.utils.data.ConcatDataset(sub_datasets)
 
     if data_config.repo_root is not None:
         _local_lerobot_metadata.ensure_local_episodes_stats(repo_id, data_config.repo_root)
