@@ -35,6 +35,7 @@ ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[4]
+DEFAULT_MANIPARENA_ROOT = os.environ.get("MANIPARENA_MOUNT_POINT", "/mnt/data/haoliang/maniparena")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -516,6 +517,8 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
+    # W&B entity name (optional).
+    wandb_entity: str | None = None
     # Project name.
     project_name: str = "openpi"
     # Experiment name. Will be used to name the metadata and checkpoint directories.
@@ -821,40 +824,41 @@ _CONFIGS = [
         data=MultiSimpleDataConfig(
             # Used as the norm-stats asset_id for the combined dataset.
             repo_id="maniparena_all_ee",
-            # All 5 task datasets. Paths are read from MANIPARENA_MOUNT_POINT (default /tmp/maniparena_data).
+            # All 5 task datasets. Paths are read from MANIPARENA_MOUNT_POINT
+            # (default /mnt/data/haoliang/maniparena).
             all_repos=(
                 (
                     "pick_fruits_into_basket",
                     os.path.join(
-                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        DEFAULT_MANIPARENA_ROOT,
                         "sim/pick_fruits_into_basket",
                     ),
                 ),
                 (
                     "press_button_in_order",
                     os.path.join(
-                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        DEFAULT_MANIPARENA_ROOT,
                         "sim/press_button_in_order",
                     ),
                 ),
                 (
                     "put_blocks_to_color",
                     os.path.join(
-                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        DEFAULT_MANIPARENA_ROOT,
                         "sim/put_blocks_to_color",
                     ),
                 ),
                 (
                     "put_ring_onto_rod",
                     os.path.join(
-                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        DEFAULT_MANIPARENA_ROOT,
                         "real/execution_reasoning/put_ring_onto_rod",
                     ),
                 ),
                 (
                     "put_spoon_to_bowl",
                     os.path.join(
-                        os.environ.get("MANIPARENA_MOUNT_POINT", "/tmp/maniparena_data"),
+                        DEFAULT_MANIPARENA_ROOT,
                         "real/execution_reasoning/put_spoon_to_bowl",
                     ),
                 ),
@@ -919,7 +923,7 @@ _CONFIGS = [
             base_config=DataConfig(
                 repo_root=os.environ.get(
                     "MANIPARENA_DATA_ROOT",
-                    "/tmp/maniparena_data/sim/put_blocks_to_color",
+                    os.path.join(DEFAULT_MANIPARENA_ROOT, "sim/put_blocks_to_color"),
                 ),
                 prompt_from_task=True,
                 action_sequence_keys=("action",),

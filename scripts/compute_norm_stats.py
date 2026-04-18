@@ -21,6 +21,17 @@ class RemoveStrings(transforms.DataTransformFn):
         return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
 
 
+class KeepNormStatKeys(transforms.DataTransformFn):
+    """Keep only the tensors needed for norm stats computation.
+
+    This avoids batching irrelevant fields such as images, whose shapes may differ
+    across datasets that otherwise share compatible state/action spaces.
+    """
+
+    def __call__(self, x: dict) -> dict:
+        return {key: x[key] for key in ("state", "actions") if key in x}
+
+
 def create_torch_dataloader(
     data_config: _config.DataConfig,
     action_horizon: int,
@@ -39,6 +50,9 @@ def create_torch_dataloader(
             *data_config.data_transforms.inputs,
             # Remove strings since they are not supported by JAX and are not needed to compute norm stats.
             RemoveStrings(),
+            # Norm stats are only computed for state/actions, so drop images and other
+            # dataset-specific fields before batching.
+            KeepNormStatKeys(),
         ],
     )
     if max_frames is not None and max_frames < len(dataset):
@@ -71,6 +85,9 @@ def create_rlds_dataloader(
             *data_config.data_transforms.inputs,
             # Remove strings since they are not supported by JAX and are not needed to compute norm stats.
             RemoveStrings(),
+            # Norm stats are only computed for state/actions, so drop images and other
+            # dataset-specific fields before batching.
+            KeepNormStatKeys(),
         ],
         is_batched=True,
     )
