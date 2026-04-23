@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import dataclasses
 import difflib
 import logging
+import os
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
 
@@ -23,6 +24,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.arx_policy as arx_policy
+import openpi.policies.maniparena_policy as maniparena_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -34,6 +36,8 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[4]
+DEFAULT_MANIPARENA_ROOT = os.environ.get("MANIPARENA_MOUNT_POINT", "/mnt/data/haoliang/maniparena")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,6 +71,10 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Optional local dataset root. When set, loaders should prefer this path over repo_id.
+    repo_root: str | None = None
+    # Optional additional local datasets, typically used to concatenate several task datasets.
+    extra_repos: tuple[tuple[str, str], ...] = ()
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -98,6 +106,15 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # Path to the data filter file for DROID dataset
     filter_dict_path: str | None = None
+
+    # If true, create segment-level samples from LeRobot `meta/episodes.jsonl` and
+    # use `tasks` + `action_config[*].action_text` as high/low prompts.
+    use_subtask_segments: bool = False
+    subtask_tasks_index: int = 0
+    subtask_state_key: str = "state"
+    subtask_action_key: str = "actions"
+    # Real action dimension before padding, used by pi0/pi05-style flow losses.
+    real_action_dim: int | None = None
 
 
 class GroupFactory(Protocol):
@@ -131,9 +148,8 @@ class ModelTransformFactory(GroupFactory):
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizeHighPrompt(
+                        _transforms.TokenizeHighLowPrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                            discrete_state_input=model_config.discrete_state_input,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -227,6 +243,45 @@ class SimpleDataConfig(DataConfigFactory):
         )
 
 @dataclasses.dataclass(frozen=True)
+class MultiSimpleDataConfig(DataConfigFactory):
+    """Train on multiple local LeRobot datasets simultaneously (concatenated).
+
+    repo_id is used as the norm-stats asset_id (e.g. "maniparena_all_ee").
+    all_repos is a tuple of (repo_id, repo_root) pairs, one per task dataset.
+    The datasets are concatenated for both norm-stats computation and training.
+    """
+
+    # Used only as the norm-stats asset_id; not a real HuggingFace repo.
+    repo_id: str = tyro.MISSING
+    # All task datasets: (task_repo_id, local_repo_root)
+    all_repos: tyro.conf.Suppress[tuple[tuple[str, str], ...]] = ()
+    # Factory for the data transforms (applied identically to every sub-dataset).
+    data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=GroupFactory)
+    # Factory for the model transforms.
+    model_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=ModelTransformFactory)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Use the first sub-dataset entry as the primary repo so create_base_config
+        # can look up the norm stats under self.repo_id.
+        base = dataclasses.replace(
+            self.base_config or DataConfig(),
+            repo_id=self.repo_id,
+            repo_root=None,  # No primary root; datasets come from extra_repos.
+            asset_id=self.repo_id,
+            norm_stats=self._load_norm_stats(
+                epath.Path(self.assets.assets_dir or assets_dirs), self.repo_id
+            ),
+            use_quantile_norm=model_config.model_type != ModelType.PI0,
+        )
+        return dataclasses.replace(
+            base,
+            data_transforms=self.data_transforms(model_config),
+            model_transforms=self.model_transforms(model_config),
+            extra_repos=self.all_repos,
+        )
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotX2robotDataConfig(DataConfigFactory):
     default_prompt: str | None = None
 
@@ -308,6 +363,43 @@ class LeRobotX2robotMoveDataConfig(DataConfigFactory):
             repack_transforms=self.repack_transforms,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotX2robotSubtaskDataConfig(DataConfigFactory):
+    default_prompt: str | None = None
+    action_sequence_keys: Sequence[str] = ("action",)
+    tasks_index: int = 0
+    state_key: str = "state"
+    action_key: str = "actions"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[arx_policy.ArxInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[arx_policy.ArxOutputs()],
+        )
+
+        assert isinstance(model_config, pi05_config.Pi05Config)
+        model_transforms = _transforms.Group(
+            inputs=[
+                _transforms.ResizeImages(224, 224),
+                _transforms.TokenizeHighLowPrompt(
+                    _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                ),
+                _transforms.PadStatesAndActions(model_config.action_dim),
+            ],
+        )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=_transforms.Group(),
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            use_subtask_segments=True,
+            subtask_tasks_index=self.tasks_index,
+            subtask_state_key=self.state_key,
+            subtask_action_key=self.action_key,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -725,6 +817,25 @@ _CONFIGS = [
         ),
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="right_pi05_20_subtask",
+        exp_name="debug_test",
+        model=pi05_config.Pi05Config(action_horizon=20, pi05=True, max_token_len=50),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
+        data=LeRobotX2robotSubtaskDataConfig(
+            repo_id="pi0_distribute_package",
+            base_config=DataConfig(
+                asset_id="pi0_distribute_package",
+            ),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3000,
+            peak_lr=2.5e-5,
+            decay_steps=150_000,
+            decay_lr=2.5e-6,
+        ),
         num_train_steps=30_000,
     ),
     TrainConfig(
@@ -1267,6 +1378,198 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=20_000,
         batch_size=32,
+    ),
+    #
+    # ManipArena configs.
+    #
+    TrainConfig(
+        name="pi05_maniparena_ee",
+        model=pi05_config.Pi05Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=MultiSimpleDataConfig(
+            # Used as the norm-stats asset_id for the combined dataset.
+            repo_id="maniparena_all_ee",
+            # All 5 task datasets. Paths are read from MANIPARENA_MOUNT_POINT
+            # (default /mnt/data/haoliang/maniparena).
+            all_repos=(
+                (
+                    "pick_fruits_into_basket",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "sim/pick_fruits_into_basket",
+                    ),
+                ),
+                (
+                    "press_button_in_order",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "sim/press_button_in_order",
+                    ),
+                ),
+                (
+                    "put_blocks_to_color",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "sim/put_blocks_to_color",
+                    ),
+                ),
+                (
+                    "put_ring_onto_rod",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "real/execution_reasoning/put_ring_onto_rod",
+                    ),
+                ),
+                (
+                    "put_spoon_to_bowl",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "real/execution_reasoning/put_spoon_to_bowl",
+                    ),
+                ),
+            ),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="ee")],
+                outputs=[maniparena_policy.ManipArenaOutputs()],
+            ).push(
+                inputs=[_transforms.DeltaActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                use_subtask_segments=True,
+                subtask_action_key="action",
+                real_action_dim=14,
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                                "low_level_prompt": "low_level_prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        # weight_loader=weight_loaders.CheckpointWeightLoader(
+        #     os.environ.get(
+        #         "PI05_BASE_CHECKPOINT",
+        #         "/home/atuin/v120bb/v120bb16/ckpt/pi05_base/params",
+        #     )
+        # ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        assets_base_dir=str(WORKSPACE_ROOT / "assets"),
+        freeze_filter=pi05_config.Pi05Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_maniparena_joints",
+        model=pi05_config.Pi05Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=SimpleDataConfig(
+            repo_id="put_blocks_to_color",
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="joints")],
+                outputs=[maniparena_policy.ManipArenaOutputs()],
+            ).push(
+                inputs=[_transforms.DeltaActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+            ),
+            base_config=DataConfig(
+                repo_root=os.environ.get(
+                    "MANIPARENA_DATA_ROOT",
+                    os.path.join(DEFAULT_MANIPARENA_ROOT, "sim/put_blocks_to_color"),
+                ),
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                use_subtask_segments=True,
+                subtask_action_key="action",
+                real_action_dim=14,
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                                "low_level_prompt": "low_level_prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            os.environ.get(
+                "PI05_BASE_CHECKPOINT",
+                "/home/atuin/v120bb/v120bb16/ckpt/pi05_base/params",
+            )
+        ),
+        assets_base_dir=str(WORKSPACE_ROOT / "assets"),
+        freeze_filter=pi05_config.Pi05Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # ManipArena config using the pre-trained pi05 LIBERO checkpoint.
+    #
+    TrainConfig(
+        name="pi05_libero_maniparena",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=SimpleDataConfig(
+            repo_id="maniparena",
+            assets=AssetsConfig(
+                assets_dir=str(WORKSPACE_ROOT / "assets" / "pi05_maniparena_ee"),
+                asset_id="put_blocks_to_color",
+            ),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="ee")],
+                outputs=[maniparena_policy.ManipArenaOutputs()],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                use_subtask_segments=True,
+                subtask_action_key="action",
+                real_action_dim=14,
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                                "low_level_prompt": "low_level_prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
+        num_train_steps=30_000,
     ),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.

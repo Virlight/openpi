@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import json
 import logging
 import multiprocessing
 import os
@@ -140,6 +141,145 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class LeRobotSubtaskDataset(Dataset):
+    """LeRobot dataset wrapper that expands `meta/episodes.jsonl` into segment-level samples."""
+
+    def __init__(
+        self,
+        repo_id_or_path: str,
+        *,
+        action_horizon: int,
+        tasks_index: int = 0,
+        state_key: str = "state",
+        action_key: str = "actions",
+    ):
+        try:
+            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+        except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
+            raise ModuleNotFoundError(
+                "LeRobot is required for segment-level subtask loading. "
+                "Install the LeRobot dependency or use the non-subtask path."
+            ) from exc
+
+        self._dataset = LeRobotDataset(repo_id_or_path, local_files_only=True)
+        self._dataset_root = self._resolve_dataset_root(repo_id_or_path)
+        self._action_horizon = action_horizon
+        self._tasks_index = tasks_index
+        self._state_key = state_key
+        self._action_key = action_key
+
+        episodes_path = self._dataset_root / "meta" / "episodes.jsonl"
+        with episodes_path.open("r", encoding="utf-8") as f:
+            self._episode_records = [json.loads(line) for line in f if line.strip()]
+        if not self._episode_records:
+            raise ValueError(f"No episode records found in {episodes_path}")
+
+        self._episode_lengths = [int(record["length"]) for record in self._episode_records]
+        self._episode_offsets = np.cumsum([0, *self._episode_lengths[:-1]]).tolist()
+        self._segments = self._build_segments()
+
+    def _format_history_prompt(self, high_level_prompt: str, history: list[str]) -> str:
+        task_text = str(high_level_prompt).strip().replace("_", " ")
+        prompt_lines = [f"Task: {task_text}"]
+        prompt_lines.append("History:")
+        if history:
+            for idx, history_item in enumerate(history, start=1):
+                history_text = str(history_item).strip().replace("_", " ")
+                prompt_lines.append(f"{idx}. {history_text}")
+        else:
+            prompt_lines.append("None")
+        return "\n".join(prompt_lines)
+
+    def _resolve_dataset_root(self, repo_id_or_path: str) -> Path:
+        path = Path(repo_id_or_path)
+        if path.exists():
+            return path
+
+        for env_key in ("HF_LEROBOT_HOME", "LEROBOT_HOME"):
+            env_value = os.environ.get(env_key)
+            if env_value is not None:
+                candidate = Path(env_value) / repo_id_or_path
+                if candidate.exists():
+                    return candidate
+
+        raise FileNotFoundError(
+            f"Could not resolve local LeRobot dataset root for {repo_id_or_path!r}. "
+            "Pass a dataset path directly or set HF_LEROBOT_HOME/LEROBOT_HOME."
+        )
+
+    def _build_segments(self) -> list[dict]:
+        segments: list[dict] = []
+        for episode_record in self._episode_records:
+            tasks = episode_record.get("tasks", [])
+            if isinstance(tasks, str):
+                tasks = [tasks]
+            if not tasks:
+                continue
+            high_level_prompt = tasks[min(self._tasks_index, len(tasks) - 1)]
+
+            history: list[str] = []
+            action_config = sorted(
+                episode_record.get("action_config", []),
+                key=lambda segment: int(segment["start_frame"]),
+            )
+            for segment in action_config:
+                action_text = segment.get("action_text")
+                if not action_text:
+                    continue
+                start_frame = int(segment["start_frame"])
+                end_frame = int(segment["end_frame"])
+                if end_frame <= start_frame:
+                    continue
+                prompt = self._format_history_prompt(high_level_prompt, history)
+                for sample_start_frame in range(start_frame, end_frame):
+                    segments.append(
+                        {
+                            "episode_index": int(episode_record["episode_index"]),
+                            "start_frame": sample_start_frame,
+                            "end_frame": end_frame,
+                            "prompt": prompt,
+                            "low_level_prompt": action_text,
+                        }
+                    )
+                history.append(action_text)
+        if not segments:
+            raise ValueError("No usable action_config segments found in meta/episodes.jsonl")
+        return segments
+
+    def _global_frame_index(self, episode_index: int, frame_index: int) -> int:
+        return self._episode_offsets[episode_index] + frame_index
+
+    def _get_frame(self, episode_index: int, frame_index: int) -> dict:
+        return self._dataset[self._global_frame_index(episode_index, frame_index)]
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        segment = self._segments[index.__index__()]
+        episode_index = segment["episode_index"]
+        start_frame = segment["start_frame"]
+        end_frame = segment["end_frame"]
+
+        frame = self._get_frame(episode_index, start_frame)
+        episode_length = self._episode_lengths[episode_index]
+        segment_last_frame = min(max(start_frame, end_frame - 1), episode_length - 1)
+
+        actions = []
+        for offset in range(self._action_horizon):
+            frame_index = min(start_frame + offset, segment_last_frame)
+            action_frame = self._get_frame(episode_index, frame_index)
+            if self._action_key not in action_frame:
+                raise KeyError(f"Action key {self._action_key!r} not found in frame keys {list(action_frame)}")
+            actions.append(np.asarray(action_frame[self._action_key], dtype=np.float32))
+
+        sample = dict(frame)
+        sample[self._action_key] = np.stack(actions, axis=0)
+        sample["prompt"] = segment["prompt"]
+        sample["low_level_prompt"] = segment["low_level_prompt"]
+        return sample
+
+    def __len__(self) -> int:
+        return len(self._segments)
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -150,9 +290,38 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, local_files_only=True)
+    if data_config.use_subtask_segments:
+        dataset_sources = [repo_root for _, repo_root in data_config.extra_repos]
+        if not dataset_sources:
+            dataset_source = data_config.repo_root or repo_id
+            if dataset_source is None:
+                raise ValueError("Subtask segment loading requires either repo_root or repo_id.")
+            dataset_sources = [dataset_source]
+
+        datasets = [
+            LeRobotSubtaskDataset(
+                dataset_source,
+                action_horizon=action_horizon,
+                tasks_index=data_config.subtask_tasks_index,
+                state_key=data_config.subtask_state_key,
+                action_key=data_config.subtask_action_key,
+            )
+            for dataset_source in dataset_sources
+        ]
+        return datasets[0] if len(datasets) == 1 else torch.utils.data.ConcatDataset(datasets)
+
+    import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+
+    if data_config.extra_repos:
+        raise NotImplementedError("extra_repos is currently only supported with use_subtask_segments=True.")
+
+    dataset_source = data_config.repo_root or data_config.repo_id
+    if dataset_source is None:
+        raise ValueError("Repo ID is not set. Cannot create dataset.")
+
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(dataset_source, local_files_only=True)
     dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
+        dataset_source,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import string
 
 import jax
@@ -69,36 +70,32 @@ class PaligemmaTokenizer:
             mask = [True] * self._max_len
         return np.asarray(tokens), np.asarray(mask)
 
+    def _normalize_prefix_text(self, prompt: str) -> str:
+        prompt = prompt.replace("_", " ").strip()
+        lines = [re.sub(r"\s+", " ", line).strip() for line in prompt.splitlines()]
+        return "\n".join(line for line in lines if line)
+
+    def _normalize_target_text(self, prompt: str) -> str:
+        return re.sub(r"\s+", " ", prompt.lower().strip().replace("_", " ").replace("\n", " "))
+
     def tokenize_high_low_prompt(self, high_prompt: str, low_prompt: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        cleaned_high_text = high_prompt.lower().strip().replace("_", " ").replace("\n", " ")
-        cleaned_low_text = low_prompt.lower().strip().replace("_", " ").replace("\n", " ")
+        cleaned_high_text = self._normalize_prefix_text(high_prompt)
+        cleaned_low_text = self._normalize_target_text(low_prompt)
 
-        # # This is the Pi05 format, where the state is part of the discrete language input.
-        # discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
-        # state_str = " ".join(map(str, discretized_state))
-
-        # Remove the last punctuation character if present and add custom symbol
-        if cleaned_high_text and cleaned_high_text[-1] in string.punctuation:
-            cleaned_high_text = cleaned_high_text[:-1]
-        cleaned_high_text += '.'  # Add your custom symbol here
-        sub_prompt_1 = f"Task: {cleaned_high_text} Subtask: "
+        sub_prompt_1 = f"{cleaned_high_text}\nCurrent: "
         tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
         ar_mask = [1] * len(tokens_1)
         loss_mask = [False] * len(tokens_1)
 
-        # Remove the last punctuation character if present and add custom symbol
-        if cleaned_low_text and cleaned_low_text[-1] in string.punctuation:
-            cleaned_low_text = cleaned_low_text[:-1]
-        cleaned_low_text += '.'  # Add your custom symbol here
-        sub_prompt_2 = f"{cleaned_low_text};\nAction: " # Warning: State is not included here which is different from original pi05
-        tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
-        ar_mask += [1] * len(tokens_2)
-        loss_mask += [True] * len(tokens_2)
-
-        # sub_prompt_3 = f"State: {state_str};\nAction: "
-        # tokens_3 = self._tokenizer.encode(sub_prompt_3)
-        # ar_mask += [0] * len(tokens_3)
-        # loss_mask += [False] * len(tokens_3)
+        tokens_2: list[int] = []
+        if cleaned_low_text:
+            if cleaned_low_text[-1] in string.punctuation:
+                cleaned_low_text = cleaned_low_text[:-1]
+            cleaned_low_text += "."
+            sub_prompt_2 = f"{cleaned_low_text}\nAction: "
+            tokens_2 = self._tokenizer.encode(sub_prompt_2, add_eos=True)
+            ar_mask += [1] * len(tokens_2)
+            loss_mask += [True] * len(tokens_2)
         tokens = tokens_1 + tokens_2
 
         tokens_len = len(tokens)
@@ -114,8 +111,33 @@ class PaligemmaTokenizer:
                     f"Token length ({len(tokens)}) exceeds max length ({self._max_len}), truncating. "
                     "Consider increasing the `max_token_len` in your model config if this happens frequently."
                 )
+                available_target_tokens = max(self._max_len - len(tokens_1), 0)
+                if tokens_2 and available_target_tokens < len(tokens_2):
+                    kept_target_tokens = min(available_target_tokens, len(tokens_2))
+                    truncated_target_tokens = len(tokens_2) - kept_target_tokens
+                    if kept_target_tokens == 0:
+                        logging.warning(
+                            "Target text was fully truncated during tokenize_high_low_prompt. "
+                            "Prefix length=%d, target length=%d, max_len=%d. "
+                            "This usually means history/prefix consumed the entire token budget.",
+                            len(tokens_1),
+                            len(tokens_2),
+                            self._max_len,
+                        )
+                    else:
+                        logging.warning(
+                            "Target text was partially truncated during tokenize_high_low_prompt. "
+                            "Prefix length=%d, target length=%d, kept target tokens=%d, truncated target tokens=%d, max_len=%d.",
+                            len(tokens_1),
+                            len(tokens_2),
+                            kept_target_tokens,
+                            truncated_target_tokens,
+                            self._max_len,
+                        )
             tokens = tokens[: self._max_len]
             mask = [True] * self._max_len
+            ar_mask = ar_mask[: self._max_len]
+            loss_mask = loss_mask[: self._max_len]
 
         return np.asarray(tokens), np.asarray(mask), np.asarray(ar_mask), np.asarray(loss_mask)
 

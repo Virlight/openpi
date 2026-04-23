@@ -277,9 +277,45 @@ class Pi05(_model.BaseModel):
         PALIGEMMA_EOS_TOKEN: int = 1,
         temperature: float = 0.0,
     ) -> str:
+        assert observation.tokenized_prompt is not None, "tokenized_prompt is required for low-level task decoding"
+        assert observation.tokenized_prompt_mask is not None, "tokenized_prompt_mask is required for low-level task decoding"
 
-        batch_size = observation.tokenized_prompt.shape[0]
-        prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prompt_tokens = observation.tokenized_prompt
+        prompt_mask = observation.tokenized_prompt_mask.astype(jnp.bool_)
+        token_positions = jnp.arange(prompt_tokens.shape[1])[None, :]
+        prompt_lengths = jnp.sum(prompt_mask, axis=-1)
+
+        if observation.token_loss_mask is not None:
+            target_mask = jnp.logical_and(prompt_mask, observation.token_loss_mask.astype(jnp.bool_))
+            has_target = jnp.any(target_mask, axis=-1)
+            first_target_index = jnp.argmax(target_mask, axis=-1)
+            prefix_lengths = jnp.where(has_target, first_target_index, prompt_lengths)
+        else:
+            prefix_lengths = prompt_lengths
+
+        prefix_text_mask = token_positions < prefix_lengths[:, None]
+        prefix_tokens = jnp.where(prefix_text_mask, prompt_tokens, 0)
+        if observation.token_ar_mask is None:
+            prefix_token_ar_mask = prefix_text_mask.astype(jnp.int32)
+        else:
+            prefix_token_ar_mask = jnp.where(
+                prefix_text_mask,
+                observation.token_ar_mask,
+                0,
+            )
+
+        prefix_observation = _model.Observation(
+            images=observation.images,
+            image_masks=observation.image_masks,
+            state=observation.state,
+            tokenized_prompt=prefix_tokens,
+            tokenized_prompt_mask=prefix_text_mask,
+            token_ar_mask=prefix_token_ar_mask,
+            token_loss_mask=jnp.zeros_like(prefix_text_mask),
+        )
+
+        batch_size = prefix_observation.tokenized_prompt.shape[0]
+        prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(prefix_observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
 
         # left to right align all input token sequences
