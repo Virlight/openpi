@@ -30,27 +30,27 @@ class ManipArenaInputs(transforms.DataTransformFn):
 
     model_type: _model.ModelType
     state_source: str = "ee"
+    include_images: bool = True
 
     def __call__(self, data: dict) -> dict:
         state = np.asarray(data["observation.state"], dtype=np.float32).reshape(-1)
         state = _select_state_slice(state, self.state_source)
-        front = _parse_image(data["observation.images.faceImg"])
-        left = _parse_image(data["observation.images.leftImg"])
-        right = _parse_image(data["observation.images.rightImg"])
+        inputs = {"state": state}
 
-        inputs = {
-            "state": state,
-            "image": {
+        if self.include_images:
+            front = _parse_image(data["observation.images.faceImg"])
+            left = _parse_image(data["observation.images.leftImg"])
+            right = _parse_image(data["observation.images.rightImg"])
+            inputs["image"] = {
                 "base_0_rgb": front,
                 "left_wrist_0_rgb": left,
                 "right_wrist_0_rgb": right,
-            },
-            "image_mask": {
+            }
+            inputs["image_mask"] = {
                 "base_0_rgb": np.True_,
                 "left_wrist_0_rgb": np.True_,
                 "right_wrist_0_rgb": np.True_,
-            },
-        }
+            }
 
         if "actions" in data:
             actions = np.asarray(data["actions"], dtype=np.float32)

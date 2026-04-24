@@ -135,6 +135,8 @@ def _create_single_local_dataset(
     action_horizon: int,
     action_sequence_keys: _config.Sequence[str],
     prompt_from_task: bool,
+    *,
+    load_videos: bool = True,
 ) -> Dataset:
     """Load one local LeRobot dataset and optionally inject task prompts."""
     _local_lerobot_metadata.ensure_local_episodes_stats(repo_id, repo_root)
@@ -144,6 +146,7 @@ def _create_single_local_dataset(
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in action_sequence_keys
         },
+        load_videos=load_videos,
     )
     if prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -151,7 +154,11 @@ def _create_single_local_dataset(
 
 
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    load_videos: bool = True,
 ) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -169,6 +176,7 @@ def create_torch_dataset(
                 action_horizon,
                 data_config.action_sequence_keys,
                 data_config.prompt_from_task,
+                load_videos=load_videos,
             )
             for sub_repo_id, sub_repo_root in data_config.extra_repos
         ]
@@ -187,6 +195,7 @@ def create_torch_dataset(
             delta_timestamps={
                 key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
             },
+            load_videos=load_videos,
         )
     else:
         dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.repo_root)

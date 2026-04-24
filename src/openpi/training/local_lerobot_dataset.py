@@ -79,9 +79,16 @@ def load_local_lerobot_metadata(repo_id: str, repo_root: str | pathlib.Path) -> 
 class LocalLeRobotDataset(torch.utils.data.Dataset):
     """Minimal local LeRobot loader for offline OpenPI training/inference."""
 
-    def __init__(self, metadata: LocalLeRobotMetadata, delta_timestamps: dict[str, list[float]] | None = None):
+    def __init__(
+        self,
+        metadata: LocalLeRobotMetadata,
+        delta_timestamps: dict[str, list[float]] | None = None,
+        *,
+        load_videos: bool = True,
+    ):
         self.meta = metadata
         self.delta_indices = None if delta_timestamps is None else get_delta_indices(delta_timestamps, self.meta.fps)
+        self._load_videos = load_videos
         self._episode_frames = {}
         self._global_index = []
 
@@ -110,8 +117,9 @@ class LocalLeRobotDataset(torch.utils.data.Dataset):
                 )
 
         current_frame = int(np.asarray(item["frame_index"]).item())
-        for video_key in self.meta.video_keys:
-            item[video_key] = _read_video_frame(self.meta.get_video_file_path(episode_index, video_key), current_frame)
+        if self._load_videos:
+            for video_key in self.meta.video_keys:
+                item[video_key] = _read_video_frame(self.meta.get_video_file_path(episode_index, video_key), current_frame)
 
         task_index = int(np.asarray(item["task_index"]).item())
         item["task"] = self.meta.tasks[task_index]

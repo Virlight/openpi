@@ -34,7 +34,8 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
-WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[4]
+WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[3]
+OPENPI_ROOT = pathlib.Path(__file__).resolve().parents[3]
 DEFAULT_MANIPARENA_ROOT = os.environ.get("MANIPARENA_MOUNT_POINT", "/mnt/data/haoliang/maniparena")
 
 
@@ -518,7 +519,7 @@ class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
     # W&B entity name (optional).
-    wandb_entity: str | None = None
+    wandb_entity: str | None = "cvpr2026-workshop"
     # Project name.
     project_name: str = "openpi"
     # Experiment name. Will be used to name the metadata and checkpoint directories.
@@ -828,24 +829,24 @@ _CONFIGS = [
             # (default /mnt/data/haoliang/maniparena).
             all_repos=(
                 (
-                    "pick_fruits_into_basket",
+                    "classify_items_as_shape",
                     os.path.join(
                         DEFAULT_MANIPARENA_ROOT,
-                        "sim/pick_fruits_into_basket",
+                        "real/semantic_reasoning/classify_items_as_shape",
                     ),
                 ),
                 (
                     "press_button_in_order",
                     os.path.join(
                         DEFAULT_MANIPARENA_ROOT,
-                        "sim/press_button_in_order",
+                        "real/semantic_reasoning/press_button_in_order",
                     ),
                 ),
                 (
                     "put_blocks_to_color",
                     os.path.join(
                         DEFAULT_MANIPARENA_ROOT,
-                        "sim/put_blocks_to_color",
+                        "real/execution_reasoning/put_blocks_to_color",
                     ),
                 ),
                 (
@@ -889,20 +890,118 @@ _CONFIGS = [
                 ),
             ),
         ),
-        # weight_loader=weight_loaders.CheckpointWeightLoader(
-        #     os.environ.get(
-        #         "PI05_BASE_CHECKPOINT",
-        #         "/home/atuin/v120bb/v120bb16/ckpt/pi05_base/params",
-        #     )
-        # ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        assets_base_dir=str(WORKSPACE_ROOT / "assets"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            os.environ.get(
+                "PI05_BASE_CHECKPOINT",
+                "./checkpoints/pi05_base/params",
+            )
+        ),
+        assets_base_dir=str(OPENPI_ROOT / "assets"),
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,    # 4× default (2.5e-5), scaled for batch_size=64
+            decay_steps=7_000,
+            decay_lr=5e-6,   # 10% of peak_lr, same ratio as default
+        ),
+        num_train_steps=7_000,
+        save_interval=1_000,
+        keep_period=1_000,
+    ),
+        TrainConfig(
+        name="pi05_maniparena_ee_full",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=MultiSimpleDataConfig(
+            assets=AssetsConfig(assets_dir=str(WORKSPACE_ROOT / "assets" / "pi05_maniparena_ee")),
+            # Used as the norm-stats asset_id for the combined dataset.
+            repo_id="maniparena_all_ee",
+            # All 5 task datasets. Paths are read from MANIPARENA_MOUNT_POINT
+            # (default /mnt/data/haoliang/maniparena).
+            all_repos=(
+                (
+                    "classify_items_as_shape",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "real/semantic_reasoning/classify_items_as_shape",
+                    ),
+                ),
+                (
+                    "press_button_in_order",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "real/semantic_reasoning/press_button_in_order",
+                    ),
+                ),
+                (
+                    "put_blocks_to_color",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "real/execution_reasoning/put_blocks_to_color",
+                    ),
+                ),
+                (
+                    "put_ring_onto_rod",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "real/execution_reasoning/put_ring_onto_rod",
+                    ),
+                ),
+                (
+                    "put_spoon_to_bowl",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_ROOT,
+                        "real/execution_reasoning/put_spoon_to_bowl",
+                    ),
+                ),
+            ),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="ee")],
+                outputs=[maniparena_policy.ManipArenaOutputs()],
+            ).push(
+                inputs=[_transforms.DeltaActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+                outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            os.environ.get(
+                "PI05_BASE_CHECKPOINT",
+                "./checkpoints/pi05_base/params",
+            )
+        ),
+        assets_base_dir=str(OPENPI_ROOT / "assets"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,    # 4× default (2.5e-5), scaled for batch_size=64
+            decay_steps=7_000,
+            decay_lr=5e-6,   # 10% of peak_lr, same ratio as default
+        ),
+        num_train_steps=7_000,
+        save_interval=1_000,
+        keep_period=1_000,
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
     ),
     TrainConfig(
         name="pi05_maniparena_joints",
@@ -946,10 +1045,10 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             os.environ.get(
                 "PI05_BASE_CHECKPOINT",
-                "/home/atuin/v120bb/v120bb16/ckpt/pi05_base/params",
+                "./checkpoints/pi05_base/params",
             )
         ),
-        assets_base_dir=str(WORKSPACE_ROOT / "assets"),
+        assets_base_dir=str(OPENPI_ROOT / "assets"),
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             paligemma_variant="gemma_2b_lora",
