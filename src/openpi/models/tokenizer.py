@@ -78,11 +78,21 @@ class PaligemmaTokenizer:
     def _normalize_target_text(self, prompt: str) -> str:
         return re.sub(r"\s+", " ", prompt.lower().strip().replace("_", " ").replace("\n", " "))
 
-    def tokenize_high_low_prompt(self, high_prompt: str, low_prompt: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _format_state_text(self, state: np.ndarray) -> str:
+        discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+        return " ".join(map(str, discretized_state))
+
+    def tokenize_high_low_prompt(
+        self, high_prompt: str, low_prompt: str, state: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         cleaned_high_text = self._normalize_prefix_text(high_prompt)
         cleaned_low_text = self._normalize_target_text(low_prompt)
 
-        sub_prompt_1 = f"{cleaned_high_text}\nCurrent: "
+        state_prefix = ""
+        if state is not None:
+            state_prefix = f"\nState: {self._format_state_text(state)}"
+
+        sub_prompt_1 = f"{cleaned_high_text}{state_prefix}\nCurrent: "
         tokens_1 = self._tokenizer.encode(sub_prompt_1, add_bos=True)
         ar_mask = [1] * len(tokens_1)
         loss_mask = [False] * len(tokens_1)

@@ -3,6 +3,7 @@ import json
 import logging
 import multiprocessing
 import os
+import re
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 from pathlib import Path
@@ -152,6 +153,7 @@ class LeRobotSubtaskDataset(Dataset):
         tasks_index: int = 0,
         state_key: str = "state",
         action_key: str = "actions",
+        annotation_root: str | None = None,
     ):
         try:
             from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -167,6 +169,8 @@ class LeRobotSubtaskDataset(Dataset):
         self._tasks_index = tasks_index
         self._state_key = state_key
         self._action_key = action_key
+        self._annotation_root = self._resolve_annotation_root(annotation_root)
+        self._annotation_episode_index = self._build_annotation_episode_index(self._annotation_root)
 
         episodes_path = self._dataset_root / "meta" / "episodes.jsonl"
         with episodes_path.open("r", encoding="utf-8") as f:
@@ -177,18 +181,6 @@ class LeRobotSubtaskDataset(Dataset):
         self._episode_lengths = [int(record["length"]) for record in self._episode_records]
         self._episode_offsets = np.cumsum([0, *self._episode_lengths[:-1]]).tolist()
         self._segments = self._build_segments()
-
-    def _format_history_prompt(self, high_level_prompt: str, history: list[str]) -> str:
-        task_text = str(high_level_prompt).strip().replace("_", " ")
-        prompt_lines = [f"Task: {task_text}"]
-        prompt_lines.append("History:")
-        if history:
-            for idx, history_item in enumerate(history, start=1):
-                history_text = str(history_item).strip().replace("_", " ")
-                prompt_lines.append(f"{idx}. {history_text}")
-        else:
-            prompt_lines.append("None")
-        return "\n".join(prompt_lines)
 
     def _resolve_dataset_root(self, repo_id_or_path: str) -> Path:
         path = Path(repo_id_or_path)
@@ -217,34 +209,153 @@ class LeRobotSubtaskDataset(Dataset):
                 continue
             high_level_prompt = tasks[min(self._tasks_index, len(tasks) - 1)]
 
-            history: list[str] = []
-            action_config = sorted(
-                episode_record.get("action_config", []),
-                key=lambda segment: int(segment["start_frame"]),
-            )
+            action_config = self._load_episode_segments(episode_record)
             for segment in action_config:
-                action_text = segment.get("action_text")
+                action_text = segment.get("action_text") or segment.get("label") or segment.get("subtask")
                 if not action_text:
                     continue
                 start_frame = int(segment["start_frame"])
                 end_frame = int(segment["end_frame"])
                 if end_frame <= start_frame:
                     continue
-                prompt = self._format_history_prompt(high_level_prompt, history)
                 for sample_start_frame in range(start_frame, end_frame):
                     segments.append(
                         {
                             "episode_index": int(episode_record["episode_index"]),
                             "start_frame": sample_start_frame,
                             "end_frame": end_frame,
-                            "prompt": prompt,
+                            "prompt": high_level_prompt,
                             "low_level_prompt": action_text,
                         }
                     )
-                history.append(action_text)
         if not segments:
             raise ValueError("No usable action_config segments found in meta/episodes.jsonl")
         return segments
+
+    def _resolve_annotation_root(self, annotation_root: str | None) -> Path | None:
+        candidate = annotation_root or os.environ.get("MANIPARENA_SUBTASK_ROOT")
+        if not candidate:
+            return None
+        path = Path(candidate)
+        return path if path.exists() else None
+
+    def _build_annotation_episode_index(self, annotation_root: Path | None) -> dict[int, list[Path]]:
+        if annotation_root is None:
+            return {}
+
+        indexed_paths: dict[int, list[Path]] = {}
+        for path in annotation_root.rglob("episode_*.json"):
+            episode_indices = self._extract_episode_indices(path)
+            if not episode_indices:
+                continue
+            for episode_index in episode_indices:
+                indexed_paths.setdefault(episode_index, []).append(path)
+        return indexed_paths
+
+    def _read_annotation_payload(self, path: Path) -> object | None:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logging.warning("Failed to read subtask annotation file %s: %s", path, exc)
+            return None
+
+    def _extract_episode_indices(self, path: Path) -> set[int]:
+        episode_indices: set[int] = set()
+        for name in (path.stem, path.parent.name):
+            match = re.search(r"episode_(\d+)", name)
+            if match is not None:
+                episode_indices.add(int(match.group(1)))
+        return episode_indices
+
+    def _annotation_match_score(self, path: Path) -> int:
+        dataset_parts = {part.lower() for part in self._dataset_root.parts}
+        candidate_parts = {part.lower() for part in path.parts}
+        return len(dataset_parts & candidate_parts)
+
+    def _annotation_record_match_score(self, payload: object, episode_record: dict[str, typing.Any], path: Path) -> int:
+        score = self._annotation_match_score(path)
+        if not isinstance(payload, dict):
+            return score
+
+        task_path = str(payload.get("task_path", "")).strip().lower().replace("\\", "/")
+        if task_path:
+            dataset_path = str(self._dataset_root).lower().replace("\\", "/")
+            if task_path in dataset_path:
+                score += 100
+
+        episode_id = str(payload.get("episode_id", "")).strip().lower().replace("\\", "/")
+        if episode_id:
+            dataset_episode_path = (
+                str(self._dataset_root / f"episode_{int(episode_record['episode_index']):06d}")
+                .lower()
+                .replace("\\", "/")
+            )
+            if episode_id in dataset_episode_path or dataset_episode_path.endswith(episode_id):
+                score += 1000
+
+        return score
+
+    def _resolve_annotation_file(self, episode_record: dict[str, typing.Any]) -> Path | None:
+        episode_index = int(episode_record["episode_index"])
+        candidates = self._annotation_episode_index.get(episode_index, [])
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda candidate: self._annotation_record_match_score(
+                self._read_annotation_payload(candidate), episode_record, candidate
+            ),
+        )
+
+    def _normalize_annotation_segments(self, payload: object) -> list[dict[str, typing.Any]]:
+        if isinstance(payload, dict):
+            for key in ("segments", "subtasks", "labels", "actions"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    payload = value
+                    break
+            else:
+                payload = [payload]
+
+        if not isinstance(payload, list):
+            return []
+
+        normalized_segments: list[dict[str, typing.Any]] = []
+        for raw_segment in payload:
+            if not isinstance(raw_segment, dict):
+                continue
+            action_text = raw_segment.get("label") or raw_segment.get("subtask") or raw_segment.get("action_text")
+            start_frame = raw_segment.get("start")
+            if start_frame is None:
+                start_frame = raw_segment.get("start_frame")
+            end_frame = raw_segment.get("end")
+            if end_frame is None:
+                end_frame = raw_segment.get("end_frame")
+            if action_text is None or start_frame is None or end_frame is None:
+                continue
+            normalized_segments.append(
+                {
+                    "action_text": str(action_text),
+                    "start_frame": int(start_frame),
+                    "end_frame": int(end_frame),
+                }
+            )
+        return normalized_segments
+
+    def _load_episode_segments(self, episode_record: dict[str, typing.Any]) -> list[dict[str, typing.Any]]:
+        annotation_file = self._resolve_annotation_file(episode_record)
+        if annotation_file is not None:
+            payload = self._read_annotation_payload(annotation_file)
+            if payload is not None:
+                normalized_segments = self._normalize_annotation_segments(payload)
+                if normalized_segments:
+                    return sorted(normalized_segments, key=lambda segment: int(segment["start_frame"]))
+
+        return sorted(
+            episode_record.get("action_config", []),
+            key=lambda segment: int(segment["start_frame"]),
+        )
 
     def _global_frame_index(self, episode_index: int, frame_index: int) -> int:
         return self._episode_offsets[episode_index] + frame_index
@@ -305,6 +416,7 @@ def create_torch_dataset(
                 tasks_index=data_config.subtask_tasks_index,
                 state_key=data_config.subtask_state_key,
                 action_key=data_config.subtask_action_key,
+                annotation_root=data_config.subtask_annotation_root,
             )
             for dataset_source in dataset_sources
         ]

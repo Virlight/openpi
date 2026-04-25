@@ -113,6 +113,10 @@ class DataConfig:
     subtask_tasks_index: int = 0
     subtask_state_key: str = "state"
     subtask_action_key: str = "actions"
+    # Optional external annotation root for subtask segments. When set, loaders
+    # will look for per-episode JSON files there before falling back to
+    # `meta/episodes.jsonl`.
+    subtask_annotation_root: str | None = None
     # Real action dimension before padding, used by pi0/pi05-style flow losses.
     real_action_dim: int | None = None
 
@@ -150,6 +154,7 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.ResizeImages(224, 224),
                         _transforms.TokenizeHighLowPrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                            discrete_state_input=model_config.discrete_state_input,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -386,6 +391,7 @@ class LeRobotX2robotSubtaskDataConfig(DataConfigFactory):
                 _transforms.ResizeImages(224, 224),
                 _transforms.TokenizeHighLowPrompt(
                     _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                    discrete_state_input=model_config.discrete_state_input,
                 ),
                 _transforms.PadStatesAndActions(model_config.action_dim),
             ],
@@ -1442,6 +1448,7 @@ _CONFIGS = [
                 action_sequence_keys=("action",),
                 use_subtask_segments=True,
                 subtask_action_key="action",
+                subtask_annotation_root=os.environ.get("MANIPARENA_SUBTASK_ROOT", DEFAULT_MANIPARENA_ROOT),
                 real_action_dim=14,
                 repack_transforms=_transforms.Group(
                     inputs=[
@@ -1498,6 +1505,7 @@ _CONFIGS = [
                 action_sequence_keys=("action",),
                 use_subtask_segments=True,
                 subtask_action_key="action",
+                subtask_annotation_root=os.environ.get("MANIPARENA_SUBTASK_ROOT", DEFAULT_MANIPARENA_ROOT),
                 real_action_dim=14,
                 repack_transforms=_transforms.Group(
                     inputs=[
@@ -1550,6 +1558,7 @@ _CONFIGS = [
                 action_sequence_keys=("action",),
                 use_subtask_segments=True,
                 subtask_action_key="action",
+                subtask_annotation_root=os.environ.get("MANIPARENA_SUBTASK_ROOT", DEFAULT_MANIPARENA_ROOT),
                 real_action_dim=14,
                 repack_transforms=_transforms.Group(
                     inputs=[

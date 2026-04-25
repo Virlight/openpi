@@ -282,18 +282,25 @@ class TokenizeHighPrompt(DataTransformFn):
 @dataclasses.dataclass(frozen=True)
 class TokenizeHighLowPrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
+    discrete_state_input: bool = False
 
     def __call__(self, data: DataDict) -> DataDict:
         if (high_prompt := data.pop("prompt", None)) is None:
             raise ValueError("Prompt is required")
         low_prompt = data.pop("low_level_prompt", "")
 
+        if self.discrete_state_input:
+            if (state := data.get("state", None)) is None:
+                raise ValueError("State is required.")
+        else:
+            state = None
+
         if not isinstance(high_prompt, str):
             high_prompt = high_prompt.item()
         if not isinstance(low_prompt, str):
             low_prompt = low_prompt.item()
 
-        tokens, token_mask, ar_mask, loss_mask = self.tokenizer.tokenize_high_low_prompt(high_prompt, low_prompt)
+        tokens, token_mask, ar_mask, loss_mask = self.tokenizer.tokenize_high_low_prompt(high_prompt, low_prompt, state)
         return {
             **data,
             "tokenized_prompt": tokens,
