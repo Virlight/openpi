@@ -37,6 +37,10 @@ Filter: TypeAlias = nnx.filterlib.Filter
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[3]
 OPENPI_ROOT = pathlib.Path(__file__).resolve().parents[3]
 DEFAULT_MANIPARENA_ROOT = os.environ.get("MANIPARENA_MOUNT_POINT", "/mnt/data/haoliang/maniparena")
+DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT = os.environ.get(
+    "MANIPARENA_SUBTASK_ANNOTATIONS_ROOT",
+    os.path.join(DEFAULT_MANIPARENA_ROOT, "annotations"),
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,6 +100,18 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # If set, override the prompt with the ManipArena subtask label whose
+    # [start_frame, end_frame] span contains the current frame_index.
+    subtask_annotations_dir: str | None = None
+    # Multi-dataset mode: list of (repo_id, annotation_root) pairs. This mirrors
+    # extra_repos so each task only scans its own annotation JSON tree.
+    extra_subtask_annotation_repos: tuple[tuple[str, str], ...] = ()
+    # If true, only frames covered by an annotation subtask span become training samples.
+    sample_only_subtask_frames: bool = False
+    # If true, future action sequences are clamped to the current subtask end frame;
+    # later steps repeat the end-frame action and are marked as padding.
+    clamp_action_sequences_to_subtask: bool = False
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -250,6 +266,11 @@ class MultiSimpleDataConfig(DataConfigFactory):
     repo_id: str = tyro.MISSING
     # All task datasets: (task_repo_id, local_repo_root)
     all_repos: tyro.conf.Suppress[tuple[tuple[str, str], ...]] = ()
+    # Optional task annotation datasets: (task_repo_id, local_annotation_root).
+    # Each root may point at a directory like
+    # .../real/semantic_reasoning/classify_items_as_shape containing
+    # chunk-000/episode_000000.json files.
+    all_annotation_repos: tyro.conf.Suppress[tuple[tuple[str, str], ...]] = ()
     # Factory for the data transforms (applied identically to every sub-dataset).
     data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=GroupFactory)
     # Factory for the model transforms.
@@ -274,6 +295,7 @@ class MultiSimpleDataConfig(DataConfigFactory):
             data_transforms=self.data_transforms(model_config),
             model_transforms=self.model_transforms(model_config),
             extra_repos=self.all_repos,
+            extra_subtask_annotation_repos=self.all_annotation_repos,
         )
 
 
@@ -821,6 +843,7 @@ _CONFIGS = [
             pi05=True,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
+            action_horizon=32,
         ),
         data=MultiSimpleDataConfig(
             # Used as the norm-stats asset_id for the combined dataset.
@@ -864,6 +887,43 @@ _CONFIGS = [
                     ),
                 ),
             ),
+            all_annotation_repos=(
+                (
+                    "classify_items_as_shape",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+                        "real/semantic_reasoning/classify_items_as_shape",
+                    ),
+                ),
+                (
+                    "press_button_in_order",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+                        "real/semantic_reasoning/press_button_in_order",
+                    ),
+                ),
+                (
+                    "put_blocks_to_color",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+                        "real/execution_reasoning/put_blocks_to_color",
+                    ),
+                ),
+                (
+                    "put_ring_onto_rod",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+                        "real/execution_reasoning/put_ring_onto_rod",
+                    ),
+                ),
+                (
+                    "put_spoon_to_bowl",
+                    os.path.join(
+                        DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+                        "real/execution_reasoning/put_spoon_to_bowl",
+                    ),
+                ),
+            ),
             data_transforms=lambda model: _transforms.Group(
                 inputs=[maniparena_policy.ManipArenaInputs(model_type=model.model_type, state_source="ee")],
                 outputs=[maniparena_policy.ManipArenaOutputs()],
@@ -872,7 +932,13 @@ _CONFIGS = [
                 outputs=[_transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1, 6, -1))],
             ),
             base_config=DataConfig(
-                prompt_from_task=True,
+                prompt_from_task=False,
+                subtask_annotations_dir=os.environ.get(
+                    "MANIPARENA_SUBTASK_ANNOTATIONS_DIR",
+                    os.path.join(DEFAULT_MANIPARENA_ROOT, "annotations"),
+                ),
+                sample_only_subtask_frames=True,
+                clamp_action_sequences_to_subtask=True,
                 action_sequence_keys=("action",),
                 repack_transforms=_transforms.Group(
                     inputs=[

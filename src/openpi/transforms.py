@@ -1,5 +1,7 @@
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+import json
+import pathlib
 import re
 from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
 
@@ -322,6 +324,143 @@ class PromptFromLeRobotTask(DataTransformFn):
             raise ValueError(f"{task_index=} not found in task mapping: {self.tasks}")
 
         return {**data, "prompt": prompt}
+
+
+def _path_match_keys(path: str | pathlib.Path) -> tuple[str, ...]:
+    path = pathlib.Path(str(path))
+    keys = [str(path), str(path.expanduser().resolve(strict=False))]
+    parts = path.parts
+    for marker in ("real", "sim"):
+        if marker in parts:
+            keys.append(str(pathlib.Path(*parts[parts.index(marker):])))
+    if "data" in parts:
+        idx = parts.index("data")
+        if idx >= 1:
+            keys.append(str(pathlib.Path(*parts[idx - 1:])))
+    return tuple(dict.fromkeys(keys))
+
+
+def _annotation_match_keys(root: pathlib.Path, path: pathlib.Path, item: Mapping) -> tuple[str, ...]:
+    keys: list[str] = []
+    parts = path.parts
+    chunk_idx = next((idx for idx, part in enumerate(parts) if part.startswith("chunk-")), None)
+    if chunk_idx is None:
+        return tuple(dict.fromkeys(keys))
+
+    parquet_name = f"{path.stem}.parquet"
+    chunk = parts[chunk_idx]
+    task_path = str(item.get("task_path") or "").strip()
+    if task_path:
+        keys.extend(_path_match_keys(pathlib.Path(task_path) / "data" / chunk / parquet_name))
+
+    for marker in ("real", "sim"):
+        if marker in parts and parts.index(marker) < chunk_idx:
+            keys.extend(_path_match_keys(pathlib.Path(*parts[parts.index(marker):chunk_idx]) / "data" / chunk / parquet_name))
+
+    try:
+        relative_parts = path.relative_to(root).parts
+    except ValueError:
+        relative_parts = ()
+    if relative_parts and relative_parts[0].startswith("chunk-"):
+        keys.extend(_path_match_keys(pathlib.Path("data") / relative_parts[0] / parquet_name))
+
+    if chunk_idx >= 1:
+        keys.extend(_path_match_keys(pathlib.Path(parts[chunk_idx - 1]) / "data" / chunk / parquet_name))
+
+    return tuple(dict.fromkeys(keys))
+
+
+@dataclasses.dataclass(frozen=True)
+class PromptFromSubtaskAnnotations(DataTransformFn):
+    """Override prompt with the subtask label covering the current frame.
+
+    Annotation JSONs are expected to contain:
+        {"parquet": ".../episode_000000.parquet",
+         "subtasks": [{"label": "...", "start_frame": 0, "end_frame": 10}]}
+
+    Frame alignment is inclusive: start_frame <= frame_index <= end_frame.
+    """
+
+    annotations_dir: str
+    _cache: dict[str, list[tuple[int, int, str]]] = dataclasses.field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _loaded: dict[str, bool] = dataclasses.field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def _load_cache(self) -> None:
+        if self._loaded.get("done"):
+            return
+
+        root = pathlib.Path(self.annotations_dir).expanduser()
+        paths = [root] if root.is_file() else sorted(root.rglob("*.json"))
+        for path in paths:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not (isinstance(item, dict) and isinstance(item.get("subtasks"), list)):
+                continue
+
+            spans: list[tuple[int, int, str]] = []
+            for subtask in item["subtasks"]:
+                label = str(subtask.get("label", "")).strip()
+                if not label:
+                    continue
+                try:
+                    start = int(subtask["start_frame"])
+                    end = int(subtask["end_frame"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if end < start:
+                    continue
+                spans.append((start, end, label))
+            if not spans:
+                continue
+
+            spans.sort(key=lambda span: (span[0], span[1]))
+            for key in _annotation_match_keys(root, path, item):
+                self._cache[key] = spans
+
+        self._loaded["done"] = True
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "_subtask_label" in data:
+            label = data["_subtask_label"]
+            if not isinstance(label, str):
+                label = str(label.item() if hasattr(label, "item") else label)
+            if label:
+                return {**data, "prompt": label}
+
+        if not self.annotations_dir:
+            return data
+        if "_parquet_path" not in data or "frame_index" not in data:
+            return data
+
+        self._load_cache()
+        parquet_path = data["_parquet_path"]
+        if not isinstance(parquet_path, str):
+            parquet_path = str(parquet_path.item() if hasattr(parquet_path, "item") else parquet_path)
+        spans = None
+        for key in _path_match_keys(parquet_path):
+            spans = self._cache.get(key)
+            if spans is not None:
+                break
+        if not spans:
+            return data
+
+        frame_idx = int(np.asarray(data["frame_index"]).item())
+        for start, end, label in spans:
+            if start <= frame_idx <= end:
+                return {**data, "prompt": label}
+        return data
 
 
 @dataclasses.dataclass(frozen=True)

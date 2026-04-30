@@ -135,6 +135,9 @@ def _create_single_local_dataset(
     action_horizon: int,
     action_sequence_keys: _config.Sequence[str],
     prompt_from_task: bool,
+    subtask_annotations_dir: str | None,
+    sample_only_subtask_frames: bool,
+    clamp_action_sequences_to_subtask: bool,
     *,
     load_videos: bool = True,
 ) -> Dataset:
@@ -147,10 +150,30 @@ def _create_single_local_dataset(
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in action_sequence_keys
         },
         load_videos=load_videos,
+        subtask_annotations_dir=subtask_annotations_dir,
+        sample_only_subtask_frames=sample_only_subtask_frames,
+        clamp_action_sequences_to_subtask=clamp_action_sequences_to_subtask,
     )
     if prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+    if subtask_annotations_dir:
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromSubtaskAnnotations(subtask_annotations_dir)])
     return dataset
+
+
+def _subtask_annotations_dir_for_repo(data_config: _config.DataConfig, repo_id: str) -> str | None:
+    for annotation_repo_id, annotation_root in data_config.extra_subtask_annotation_repos:
+        if annotation_repo_id == repo_id:
+            if not annotation_root or os.path.exists(os.path.expanduser(annotation_root)):
+                return annotation_root
+            logging.warning(
+                "Subtask annotation root for repo %s does not exist: %s. Falling back to %s.",
+                repo_id,
+                annotation_root,
+                data_config.subtask_annotations_dir,
+            )
+            return data_config.subtask_annotations_dir
+    return data_config.subtask_annotations_dir
 
 
 def create_torch_dataset(
@@ -176,6 +199,9 @@ def create_torch_dataset(
                 action_horizon,
                 data_config.action_sequence_keys,
                 data_config.prompt_from_task,
+                _subtask_annotations_dir_for_repo(data_config, sub_repo_id),
+                data_config.sample_only_subtask_frames,
+                data_config.clamp_action_sequences_to_subtask,
                 load_videos=load_videos,
             )
             for sub_repo_id, sub_repo_root in data_config.extra_repos
@@ -196,6 +222,9 @@ def create_torch_dataset(
                 key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
             },
             load_videos=load_videos,
+            subtask_annotations_dir=data_config.subtask_annotations_dir,
+            sample_only_subtask_frames=data_config.sample_only_subtask_frames,
+            clamp_action_sequences_to_subtask=data_config.clamp_action_sequences_to_subtask,
         )
     else:
         dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.repo_root)
@@ -209,6 +238,8 @@ def create_torch_dataset(
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+    if data_config.subtask_annotations_dir:
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromSubtaskAnnotations(data_config.subtask_annotations_dir)])
 
     return dataset
 
