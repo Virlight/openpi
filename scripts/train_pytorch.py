@@ -45,6 +45,7 @@ import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
+import openpi.training.wandb_logging as training_wandb_logging
 
 
 def init_logging():
@@ -380,6 +381,7 @@ def train_loop(config: _config.TrainConfig):
             images_to_log.append(wandb.Image(img_concatenated))
 
         wandb.log({"camera_views": images_to_log}, step=0)
+        training_wandb_logging.log_prompt_samples(config, data_config, step=0)
 
         # Clear sample batch from memory aggressively
         del sample_batch, observation, actions, images_to_log, img_concatenated
