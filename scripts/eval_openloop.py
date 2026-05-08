@@ -147,6 +147,8 @@ def run(args: argparse.Namespace):
     while idx < num_frames:
         state = np.array(df["observation.state"].iloc[idx], dtype=np.float32)
         payload = {
+            "episode_index": args.episode,
+            "frame_index": idx,
             "state": {
                 "follow1_pos": state[:7].tolist(),
                 "follow2_pos": state[7:14].tolist(),

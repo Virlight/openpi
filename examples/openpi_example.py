@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────
 
-OPENPI_CONFIG_NAME = "your_openpi_config_name"  # e.g. "pi0_your_task_ee"
+OPENPI_CONFIG_NAME = "pi05_maniparena_ee"
 DEFAULT_PROMPT = "pick up the banana"
 ACTION_END_RATIO = 0.8  # keep first 80% of predicted actions
 
@@ -77,9 +77,12 @@ class MyPolicy(ModelPolicy):
     def convert_input(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """ManipArena observation → OpenPI observation dict."""
         state_dict = obs.get("state", {})
-        f1 = np.asarray(state_dict.get("follow1_pos", np.zeros(7)), dtype=np.float32)[:7]
-        f2 = np.asarray(state_dict.get("follow2_pos", np.zeros(7)), dtype=np.float32)[:7]
-        # OpenPI state: [left_pos(3), left_euler(3), left_grip(1), right_pos(3), right_euler(3), right_grip(1)]
+        if self.control_mode == "joints":
+            f1 = np.asarray(state_dict.get("follow1_joints", state_dict.get("follow1_pos", np.zeros(7))), dtype=np.float32)[:7]
+            f2 = np.asarray(state_dict.get("follow2_joints", state_dict.get("follow2_pos", np.zeros(7))), dtype=np.float32)[:7]
+        else:
+            f1 = np.asarray(state_dict.get("follow1_pos", np.zeros(7)), dtype=np.float32)[:7]
+            f2 = np.asarray(state_dict.get("follow2_pos", np.zeros(7)), dtype=np.float32)[:7]
         state = np.concatenate([f1[:6], f1[6:7], f2[:6], f2[6:7]]).astype(np.float32)
 
         openpi_obs: Dict[str, Any] = {
@@ -112,6 +115,14 @@ class MyPolicy(ModelPolicy):
 
         left = actions[:, :7]
         right = actions[:, 7:14]
+
+        if self.control_mode == "joints":
+            return {
+                "follow1_joints": left.tolist(),
+                "follow2_joints": right.tolist(),
+                "follow1_pos": left.tolist(),
+                "follow2_pos": right.tolist(),
+            }
 
         return {
             "follow1_pos": left.tolist(),

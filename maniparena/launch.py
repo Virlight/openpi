@@ -26,15 +26,15 @@ def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
-
     # Import here so users can swap out the policy module without touching this file.
     # By default we look for examples/my_policy.py on sys.path.
     try:
-        from my_policy import MyPolicy
-    except ImportError:
+        from examples.my_policy import MyPolicy
+    except ImportError as exc:
         logger.error(
-            "Cannot import MyPolicy. Make sure examples/my_policy.py (or your own "
-            "policy file) is on PYTHONPATH, e.g.: PYTHONPATH=examples python -m maniparena.launch ..."
+            "Cannot import MyPolicy from examples.my_policy: %s. Make sure the policy module and "
+            "its dependencies are importable.",
+            exc,
         )
         sys.exit(1)
 
