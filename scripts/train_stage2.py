@@ -9,7 +9,7 @@ Launch from the openpi repo root:
     cd /mnt/models/haoliang/CVPR2026-Workshop/openpi
 
     # Uses the existing stage-one norm stats:
-    # assets/pi05_maniparena_ee/maniparena_all_ee/norm_stats.json
+    # assets/pi05_maniparena_ee/maniparena_5_ee/norm_stats.json
 
     # With memory preallocation (may cause OOM on some GPUs, adjust XLA_PYTHON_CLIENT_MEM_FRACTION as needed):
     CUDA_VISIBLE_DEVICES=1 \
@@ -19,13 +19,22 @@ Launch from the openpi repo root:
         --exp-name subtask_run01 \
         --batch-size 1 \
         --overwrite
-    
+
     # Without memory preallocation (may cause fragmentation and slower training, but more robust to OOM):
-    export XLA_PYTHON_CLIENT_PREALLOCATE=false 
+    export XLA_PYTHON_CLIENT_PREALLOCATE=false
     CUDA_VISIBLE_DEVICES=1 \
     PI05_BASE_CHECKPOINT=/mnt/models/haoliang/CVPR2026-Workshop/openpi/checkpoints/pi05_maniparena_ee/run23/5000/params \
     python scripts/train_stage2.py pi05_maniparena_ee_stage2 \
         --exp-name subtask_run01 \
+        --batch-size 1 \
+        --overwrite
+
+    # Text-CFG variant:
+    CUDA_VISIBLE_DEVICES=1 \
+    PI05_BASE_CHECKPOINT=/mnt/models/haoliang/CVPR2026-Workshop/openpi/checkpoints/pi05_maniparena_ee/run23/5000/params \
+    XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+    python scripts/train_stage2.py pi05_maniparena_ee_stage2_text_cfg \
+        --exp-name subtask_text_cfg_run01 \
         --batch-size 1 \
         --overwrite
 """

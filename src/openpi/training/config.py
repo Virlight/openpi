@@ -14,6 +14,7 @@ import flax.nnx as nnx
 from typing_extensions import override
 import tyro
 
+import openpi.methods.text_cfg as text_cfg
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
@@ -37,6 +38,149 @@ Filter: TypeAlias = nnx.filterlib.Filter
 WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[3]
 OPENPI_ROOT = pathlib.Path(__file__).resolve().parents[3]
 DEFAULT_MANIPARENA_ROOT = os.environ.get("MANIPARENA_MOUNT_POINT", "/mnt/data/haoliang/maniparena")
+
+MANIPARENA_REAL_EE_REPOS = (
+    (
+        "arrange_cup_inverted_triangle",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/arrange_cup_inverted_triangle",
+        ),
+    ),
+    (
+        "insert_wireline",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/insert_wireline",
+        ),
+    ),
+    (
+        "pick_items_into_basket",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/pick_items_into_basket",
+        ),
+    ),
+    (
+        "pour_water_from_bottle",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/pour_water_from_bottle",
+        ),
+    ),
+    (
+        "put_blocks_to_color",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/put_blocks_to_color",
+        ),
+    ),
+    (
+        "put_glasses_on_woodshelf",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/put_glasses_on_woodshelf",
+        ),
+    ),
+    (
+        "put_items_into_drawer",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/put_items_into_drawer",
+        ),
+    ),
+    (
+        "put_ring_onto_rod",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/put_ring_onto_rod",
+        ),
+    ),
+    (
+        "put_spoon_to_bowl",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/put_spoon_to_bowl",
+        ),
+    ),
+    (
+        "put_stationery_in_case",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/execution_reasoning/put_stationery_in_case",
+        ),
+    ),
+    (
+        "hang_up_picture",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/mobile_manipulation/hang_up_picture",
+        ),
+    ),
+    (
+        "organize_shoes",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/mobile_manipulation/organize_shoes",
+        ),
+    ),
+    (
+        "put_bottle_on_woodshelf",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/mobile_manipulation/put_bottle_on_woodshelf",
+        ),
+    ),
+    (
+        "put_clothes_in_hamper",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/mobile_manipulation/put_clothes_in_hamper",
+        ),
+    ),
+    (
+        "take_and_set_tableware",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/mobile_manipulation/take_and_set_tableware",
+        ),
+    ),
+    (
+        "classify_items_as_shape",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/semantic_reasoning/classify_items_as_shape",
+        ),
+    ),
+    (
+        "pair_up_items",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/semantic_reasoning/pair_up_items",
+        ),
+    ),
+    (
+        "pick_fruits_into_basket",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/semantic_reasoning/pick_fruits_into_basket",
+        ),
+    ),
+    (
+        "press_button_in_order",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/semantic_reasoning/press_button_in_order",
+        ),
+    ),
+    (
+        "sort_headphone",
+        os.path.join(
+            DEFAULT_MANIPARENA_ROOT,
+            "real/semantic_reasoning/sort_headphone",
+        ),
+    ),
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -175,6 +319,10 @@ class ModelTransformFactory(GroupFactory):
                 )
 
 
+def _make_maniparena_all_obs_model_transforms(model: _model.BaseModelConfig) -> _transforms.Group:
+    return ModelTransformFactory()(model)
+
+
 @dataclasses.dataclass(frozen=True)
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
@@ -264,9 +412,7 @@ class MultiSimpleDataConfig(DataConfigFactory):
             repo_id=self.repo_id,
             repo_root=None,  # No primary root; datasets come from extra_repos.
             asset_id=self.repo_id,
-            norm_stats=self._load_norm_stats(
-                epath.Path(self.assets.assets_dir or assets_dirs), self.repo_id
-            ),
+            norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), self.repo_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
         )
         return dataclasses.replace(
@@ -824,7 +970,7 @@ _CONFIGS = [
         ),
         data=MultiSimpleDataConfig(
             # Used as the norm-stats asset_id for the combined dataset.
-            repo_id="maniparena_all_ee",
+            repo_id="maniparena_5_ee",
             # All 5 task datasets. Paths are read from MANIPARENA_MOUNT_POINT
             # (default /mnt/data/haoliang/maniparena).
             all_repos=(
@@ -905,21 +1051,89 @@ _CONFIGS = [
         ema_decay=None,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
-            peak_lr=5e-5,    # 4× default (2.5e-5), scaled for batch_size=64
+            peak_lr=5e-5,  # 4x default (2.5e-5), scaled for batch_size=64
             decay_steps=7_000,
-            decay_lr=5e-6,   # 10% of peak_lr, same ratio as default
+            decay_lr=5e-6,  # 10% of peak_lr, same ratio as default
         ),
         num_train_steps=7_000,
         save_interval=1_000,
         keep_period=1_000,
     ),
-        TrainConfig(
+    TrainConfig(
+        name="pi05_maniparena_all_ee",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=32,
+            action_horizon=32,
+        ),
+        data=MultiSimpleDataConfig(
+            assets=AssetsConfig(
+                assets_dir=str(OPENPI_ROOT / "assets" / "pi05_maniparena_all_ee"),
+            ),
+            # Norm stats are for compact EE/mobile state and compact actions.
+            repo_id="maniparena_all_ee",
+            all_repos=MANIPARENA_REAL_EE_REPOS,
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[maniparena_policy.ManipArenaAllObsInputs(model_type=model.model_type)],
+                outputs=[maniparena_policy.ManipArenaAllObsOutputs()],
+            ).push(
+                inputs=[maniparena_policy.ManipArenaAllObsDeltaActions()],
+                outputs=[maniparena_policy.ManipArenaAllObsAbsoluteActions()],
+            ),
+            model_transforms=_make_maniparena_all_obs_model_transforms,
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+                repack_transforms=_transforms.Group(
+                    inputs=[
+                        _transforms.RepackTransform(
+                            {
+                                "observation.state": "observation.state",
+                                "observation.images.faceImg": "observation.images.faceImg",
+                                "observation.images.leftImg": "observation.images.leftImg",
+                                "observation.images.rightImg": "observation.images.rightImg",
+                                "actions": "action",
+                                "prompt": "prompt",
+                            }
+                        )
+                    ]
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            os.environ.get(
+                "PI05_BASE_CHECKPOINT",
+                "./checkpoints/pi05_base/params",
+            )
+        ),
+        assets_base_dir=str(OPENPI_ROOT / "assets"),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=7_000,
+            decay_lr=5e-6,
+        ),
+        num_train_steps=7_000,
+        # Keep all_ee data loading in the main process to avoid duplicating large local dataset state.
+        # num_workers=0,
+        save_interval=1_000,
+        keep_period=1_000,
+    ),
+    TrainConfig(
         name="pi05_maniparena_ee_full",
         model=pi0_config.Pi0Config(pi05=True),
         data=MultiSimpleDataConfig(
             assets=AssetsConfig(assets_dir=str(WORKSPACE_ROOT / "assets" / "pi05_maniparena_ee")),
             # Used as the norm-stats asset_id for the combined dataset.
-            repo_id="maniparena_all_ee",
+            repo_id="maniparena_5_ee",
             # All 5 task datasets. Paths are read from MANIPARENA_MOUNT_POINT
             # (default /mnt/data/haoliang/maniparena).
             all_repos=(
@@ -994,9 +1208,9 @@ _CONFIGS = [
         assets_base_dir=str(OPENPI_ROOT / "assets"),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
-            peak_lr=5e-5,    # 4× default (2.5e-5), scaled for batch_size=64
+            peak_lr=5e-5,  # 4x default (2.5e-5), scaled for batch_size=64
             decay_steps=7_000,
-            decay_lr=5e-6,   # 10% of peak_lr, same ratio as default
+            decay_lr=5e-6,  # 10% of peak_lr, same ratio as default
         ),
         num_train_steps=7_000,
         save_interval=1_000,
@@ -1302,6 +1516,19 @@ _CONFIGS = [
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
 ]
+
+# 
+# Add text-CFG variants after the base configs are defined. 
+# ``with_text_cfg`` returns a new TrainConfig derived from the matched base config; it does not modify the original config already in ``_CONFIGS``.
+# 
+_CONFIGS.extend(
+    [
+        text_cfg.with_text_cfg(
+            next(config for config in _CONFIGS if config.name == "pi05_maniparena_all_ee"),
+            "pi05_maniparena_all_ee_text_cfg",
+        ),
+    ]
+)
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

@@ -26,12 +26,19 @@ _SAMPLE_COLUMNS = [
     "prompt_source",
     "task_prompt",
     "llm_input",
+    "text_cfg_enabled",
+    "uncond_llm_input",
     "state_dim",
     "normalized_state_preview",
     "discretized_state_preview",
     "action_shape",
     "padded_action_steps",
     "prompt_token_count",
+    "token_ids_preview",
+    "uncond_prompt_token_count",
+    "uncond_token_ids_preview",
+    "cond_uncond_token_count_delta",
+    "cond_uncond_different_token_count",
     "prompt_truncated",
 ]
 
@@ -43,12 +50,19 @@ _COLUMN_DESCRIPTIONS = {
     "prompt_source": "Where the prompt came from, e.g. stage2 subtask annotation, dataset prompt, or injected default.",
     "task_prompt": "Task/subtask text used before tokenizer formatting.",
     "llm_input": "Exact text preview constructed for the language tokenizer before token-id encoding.",
+    "text_cfg_enabled": "Whether this sample uses TextCFG conditional plus empty-task unconditional prompt tokens.",
+    "uncond_llm_input": "TextCFG empty-task tokenizer input preview. It keeps the same discretized state for Pi05.",
     "state_dim": "Number of normalized state values included in the discrete language input.",
     "normalized_state_preview": "First normalized continuous state values before 256-bin discretization.",
     "discretized_state_preview": "First discrete state tokens that appear in the PI05/FAST language input.",
     "action_shape": "Shape of the transformed action array available at tokenization time.",
     "padded_action_steps": "Number of future action steps padded by stage2 subtask clamping, when available.",
     "prompt_token_count": "Number of non-padding language tokens after tokenization.",
+    "token_ids_preview": "First conditional prompt token IDs after tokenization.",
+    "uncond_prompt_token_count": "Number of non-padding empty-task unconditional prompt tokens for TextCFG.",
+    "uncond_token_ids_preview": "First unconditional prompt token IDs after TextCFG empty-task tokenization.",
+    "cond_uncond_token_count_delta": "Conditional prompt token count minus TextCFG unconditional prompt token count.",
+    "cond_uncond_different_token_count": "Number of token positions where TextCFG conditional and unconditional inputs differ.",
     "prompt_truncated": "Whether the tokenizer input reached max_token_len, indicating possible truncation.",
 }
 
@@ -113,7 +127,7 @@ def collect_prompt_samples(
     ]
 
     records: list[dict[str, Any]] = []
-    for sample_index in range(min(num_samples, len(dataset))):
+    for sample_index in _sample_indices(len(dataset), num_samples):
         record = _collect_prompt_sample(dataset[sample_index], transforms, sample_index=sample_index)
         if record is not None:
             records.append(record)
@@ -132,6 +146,17 @@ def _collect_prompt_sample(
             record = _record_paligemma_prompt(source_data, data, transform, sample_index=sample_index)
             tokenized = transform(data)
             return {**record, **_token_stats(tokenized, record.get("max_token_len"))}
+        if _is_text_cfg_tokenizer(transform):
+            record = _record_paligemma_prompt(source_data, data, transform, sample_index=sample_index, text_cfg=True)
+            tokenized = transform(data)
+            token_stats = _token_stats(tokenized, record.get("max_token_len"))
+            uncond_stats = _uncond_token_stats(tokenized)
+            if uncond_stats:
+                uncond_stats["cond_uncond_token_count_delta"] = (
+                    token_stats["prompt_token_count"] - uncond_stats["uncond_prompt_token_count"]
+                )
+                uncond_stats["cond_uncond_different_token_count"] = _cond_uncond_different_token_count(tokenized)
+            return {**record, **token_stats, **uncond_stats}
         if isinstance(transform, _transforms.TokenizeFASTInputs):
             record = _record_fast_prompt(source_data, data, transform, sample_index=sample_index)
             tokenized = transform(data)
@@ -143,9 +168,10 @@ def _collect_prompt_sample(
 def _record_paligemma_prompt(
     source_data: _transforms.DataDict,
     data: _transforms.DataDict,
-    transform: _transforms.TokenizePrompt,
+    transform: Any,
     *,
     sample_index: int,
+    text_cfg: bool = False,
 ) -> dict[str, Any]:
     if "prompt" not in data:
         raise ValueError("Cannot log LLM prompt sample because the transformed data has no 'prompt' key.")
@@ -160,10 +186,13 @@ def _record_paligemma_prompt(
     else:
         state_str = _discretized_state_text(state)
         llm_input = f"Task: {cleaned_prompt}, State: {state_str};\nAction: "
+        uncond_llm_input = f"Task: , State: {state_str};\nAction: "
         prompt_template = "Task: {prompt}, State: {discretized_state};\\nAction: "
         note = (
             "No explicit system prompt is configured. Pi05 tokenizes the user prompt with the discretized state prefix."
         )
+    if state is None:
+        uncond_llm_input = "\n"
 
     return {
         **_source_metadata(source_data, data),
@@ -177,6 +206,8 @@ def _record_paligemma_prompt(
         "task_prompt": _truncate(cleaned_prompt),
         "prompt_template": prompt_template,
         "llm_input": _truncate(llm_input),
+        "text_cfg_enabled": text_cfg,
+        "uncond_llm_input": _truncate(uncond_llm_input) if text_cfg else "",
         **_state_metadata(state),
         **_action_metadata(source_data, data),
         "note": note,
@@ -216,6 +247,8 @@ def _record_fast_prompt(
         "task_prompt": _truncate(cleaned_prompt),
         "prompt_template": prompt_template,
         "llm_input": _truncate(llm_input),
+        "text_cfg_enabled": False,
+        "uncond_llm_input": "",
         **_state_metadata(data["state"]),
         **_action_metadata(source_data, data),
         "note": (
@@ -246,6 +279,50 @@ def _token_stats(data: _transforms.DataDict, max_token_len: Any) -> dict[str, An
         "prompt_truncated": bool(max_len and valid_count >= max_len),
         "token_ids_preview": preview,
     }
+
+
+def _uncond_token_stats(data: _transforms.DataDict) -> dict[str, Any]:
+    tokens = data.get("token_ar_mask")
+    token_mask = data.get("token_loss_mask")
+    if tokens is None or token_mask is None:
+        return {}
+
+    tokens = np.asarray(tokens)
+    token_mask = np.asarray(token_mask, dtype=bool)
+    valid_count = int(token_mask.sum()) if token_mask.size else int(tokens.size)
+    valid_tokens = tokens[:valid_count]
+    preview_tokens = valid_tokens[:_TOKEN_PREVIEW_LEN]
+    preview = " ".join(str(int(token)) for token in preview_tokens)
+    if valid_tokens.size > _TOKEN_PREVIEW_LEN:
+        preview += f" ... (+{valid_tokens.size - _TOKEN_PREVIEW_LEN} more)"
+
+    return {
+        "uncond_prompt_token_count": valid_count,
+        "uncond_token_ids_preview": preview,
+    }
+
+
+def _cond_uncond_different_token_count(data: _transforms.DataDict) -> int:
+    cond_tokens = np.asarray(data.get("tokenized_prompt", []))
+    cond_mask = np.asarray(data.get("tokenized_prompt_mask", []), dtype=bool)
+    uncond_tokens = np.asarray(data.get("token_ar_mask", []))
+    uncond_mask = np.asarray(data.get("token_loss_mask", []), dtype=bool)
+    if not cond_tokens.size or not uncond_tokens.size:
+        return 0
+
+    compared = np.logical_or(cond_mask, uncond_mask)
+    return int(np.logical_and(cond_tokens != uncond_tokens, compared).sum())
+
+
+def _is_text_cfg_tokenizer(transform: Any) -> bool:
+    return type(transform).__name__ == "TokenizePromptWithUncond" and hasattr(transform, "tokenizer")
+
+
+def _sample_indices(dataset_size: int, num_samples: int) -> list[int]:
+    if dataset_size <= 0 or num_samples <= 0:
+        return []
+    count = min(dataset_size, num_samples)
+    return [int(index) for index in np.linspace(0, dataset_size - 1, count)]
 
 
 def _source_metadata(source_data: _transforms.DataDict, data: _transforms.DataDict) -> dict[str, Any]:

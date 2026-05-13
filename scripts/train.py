@@ -1,3 +1,29 @@
+"""JAX training entry point for configs in ``openpi.training.config``.
+
+Launch from the openpi repo root:
+
+    cd /mnt/models/haoliang/CVPR2026-Workshop/openpi
+
+    CUDA_VISIBLE_DEVICES=1 \
+    PI05_BASE_CHECKPOINT=checkpoints/pi05_base/params \
+    uv run scripts/train.py pi05_maniparena_ee \
+        --exp-name all_run02 \
+        --batch-size 1 \
+        --overwrite
+
+Text-CFG variant:
+
+    CUDA_VISIBLE_DEVICES=0 \
+    PI05_BASE_CHECKPOINT=checkpoints/pi05_base/params \
+    python scripts/train.py pi05_maniparena_all_ee_text_cfg \
+        --exp-name all_run01 \
+        --batch-size 2 \
+        --overwrite
+
+Stage2 text-CFG configs live in ``openpi.training_stage2.config`` and should be launched with
+``scripts/train_stage2.py``.
+"""
+
 import dataclasses
 import functools
 import logging
@@ -161,6 +187,7 @@ def train_step(
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
+    text_dropout_prob = getattr(config.model, "text_dropout_prob", None)
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
@@ -197,6 +224,40 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
+    if (
+        text_dropout_prob is not None
+        and observation.tokenized_prompt is not None
+        and observation.tokenized_prompt_mask is not None
+        and observation.token_ar_mask is not None
+        and observation.token_loss_mask is not None
+    ):
+        _, text_dropout_rng, _, _ = jax.random.split(train_rng, 4)
+        drop = jax.random.bernoulli(
+            text_dropout_rng,
+            p=float(text_dropout_prob),
+            shape=observation.tokenized_prompt_mask.shape[:-1],
+        )
+        uncond_prompt_mask = observation.token_loss_mask.astype(jnp.bool_)
+        compared_prompt_mask = jnp.logical_or(observation.tokenized_prompt_mask, uncond_prompt_mask)
+        different_tokens = jnp.logical_and(
+            observation.tokenized_prompt != observation.token_ar_mask.astype(observation.tokenized_prompt.dtype),
+            compared_prompt_mask,
+        )
+        info.update(
+            {
+                "text_cfg/text_dropout_fraction": jnp.mean(drop.astype(jnp.float32)),
+                "text_cfg/text_dropout_prob": jnp.asarray(text_dropout_prob, dtype=jnp.float32),
+                "text_cfg/cond_prompt_tokens_mean": jnp.mean(
+                    jnp.sum(observation.tokenized_prompt_mask, axis=-1).astype(jnp.float32)
+                ),
+                "text_cfg/uncond_prompt_tokens_mean": jnp.mean(
+                    jnp.sum(uncond_prompt_mask, axis=-1).astype(jnp.float32)
+                ),
+                "text_cfg/cond_uncond_different_tokens_mean": jnp.mean(
+                    jnp.sum(different_tokens, axis=-1).astype(jnp.float32)
+                ),
+            }
+        )
     return new_state, info
 
 

@@ -15,6 +15,7 @@ import etils.epath as epath
 from typing_extensions import override
 import tyro
 
+import openpi.methods.text_cfg as text_cfg
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.policies.maniparena_policy as maniparena_policy
@@ -96,36 +97,36 @@ class Stage2MultiSimpleDataConfig(_base_config.DataConfigFactory):
 
 
 MANIPARENA_EE_REPOS = (
-    # (
-    #     "classify_items_as_shape",
-    #     os.path.join(DEFAULT_MANIPARENA_ROOT, "real/semantic_reasoning/classify_items_as_shape"),
-    # ),
+    (
+        "classify_items_as_shape",
+        os.path.join(DEFAULT_MANIPARENA_ROOT, "real/semantic_reasoning/classify_items_as_shape"),
+    ),
     (
         "press_button_in_order",
         os.path.join(DEFAULT_MANIPARENA_ROOT, "real/semantic_reasoning/press_button_in_order"),
     ),
-    # (
-    #     "put_blocks_to_color",
-    #     os.path.join(DEFAULT_MANIPARENA_ROOT, "real/execution_reasoning/put_blocks_to_color"),
-    # ),
-    # (
-    #     "put_ring_onto_rod",
-    #     os.path.join(DEFAULT_MANIPARENA_ROOT, "real/execution_reasoning/put_ring_onto_rod"),
-    # ),
-    # (
-    #     "put_spoon_to_bowl",
-    #     os.path.join(DEFAULT_MANIPARENA_ROOT, "real/execution_reasoning/put_spoon_to_bowl"),
-    # ),
+    (
+        "put_blocks_to_color",
+        os.path.join(DEFAULT_MANIPARENA_ROOT, "real/execution_reasoning/put_blocks_to_color"),
+    ),
+    (
+        "put_ring_onto_rod",
+        os.path.join(DEFAULT_MANIPARENA_ROOT, "real/execution_reasoning/put_ring_onto_rod"),
+    ),
+    (
+        "put_spoon_to_bowl",
+        os.path.join(DEFAULT_MANIPARENA_ROOT, "real/execution_reasoning/put_spoon_to_bowl"),
+    ),
 )
 
 MANIPARENA_EE_ANNOTATION_REPOS = (
-    # (
-    #     "classify_items_as_shape",
-    #     os.path.join(
-    #         DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
-    #         "real/semantic_reasoning/classify_items_as_shape",
-    #     ),
-    # ),
+    (
+        "classify_items_as_shape",
+        os.path.join(
+            DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+            "real/semantic_reasoning/classify_items_as_shape",
+        ),
+    ),
     (
         "press_button_in_order",
         os.path.join(
@@ -133,27 +134,27 @@ MANIPARENA_EE_ANNOTATION_REPOS = (
             "real/semantic_reasoning/press_button_in_order",
         ),
     ),
-    # (
-    #     "put_blocks_to_color",
-    #     os.path.join(
-    #         DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
-    #         "real/execution_reasoning/put_blocks_to_color",
-    #     ),
-    # ),
-    # (
-    #     "put_ring_onto_rod",
-    #     os.path.join(
-    #         DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
-    #         "real/execution_reasoning/put_ring_onto_rod",
-    #     ),
-    # ),
-    # (
-    #     "put_spoon_to_bowl",
-    #     os.path.join(
-    #         DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
-    #         "real/execution_reasoning/put_spoon_to_bowl",
-    #     ),
-    # ),
+    (
+        "put_blocks_to_color",
+        os.path.join(
+            DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+            "real/execution_reasoning/put_blocks_to_color",
+        ),
+    ),
+    (
+        "put_ring_onto_rod",
+        os.path.join(
+            DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+            "real/execution_reasoning/put_ring_onto_rod",
+        ),
+    ),
+    (
+        "put_spoon_to_bowl",
+        os.path.join(
+            DEFAULT_MANIPARENA_SUBTASK_ANNOTATIONS_ROOT,
+            "real/execution_reasoning/put_spoon_to_bowl",
+        ),
+    ),
 )
 
 
@@ -169,7 +170,7 @@ _CONFIGS = [
         data=Stage2MultiSimpleDataConfig(
             # Stage2 keeps the same state/action normalization as stage1.
             assets=AssetsConfig(assets_dir=str(OPENPI_ROOT / "assets" / "pi05_maniparena_ee")),
-            repo_id="maniparena_all_ee",
+            repo_id="maniparena_5_ee",
             all_repos=MANIPARENA_EE_REPOS,
             all_annotation_repos=MANIPARENA_EE_ANNOTATION_REPOS,
             data_transforms=lambda model: _transforms.Group(
@@ -228,6 +229,19 @@ _CONFIGS = [
         keep_period=1_000,
     ),
 ]
+
+# 
+# Add text-CFG variants after the base configs are defined. 
+# ``with_text_cfg`` returns a new TrainConfig derived from the matched base config; it does not modify the original config already in ``_CONFIGS``.
+# 
+_CONFIGS.extend(
+    [
+        text_cfg.with_text_cfg(
+            next(config for config in _CONFIGS if config.name == "pi05_maniparena_ee_stage2"),
+            "pi05_maniparena_ee_stage2_text_cfg",
+        ),
+    ]
+)
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
