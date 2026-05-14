@@ -6,18 +6,21 @@ Launch from the openpi repo root:
 
     CUDA_VISIBLE_DEVICES=1 \
     PI05_BASE_CHECKPOINT=checkpoints/pi05_base/params \
-    uv run scripts/train.py pi05_maniparena_ee \
+    XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+    python scripts/train.py pi05_maniparena_ee \
         --exp-name all_run02 \
         --batch-size 1 \
         --overwrite
 
 Text-CFG variant:
 
-    CUDA_VISIBLE_DEVICES=0 \
+    CUDA_VISIBLE_DEVICES=1 \
     PI05_BASE_CHECKPOINT=checkpoints/pi05_base/params \
+    XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
     python scripts/train.py pi05_maniparena_all_ee_text_cfg \
         --exp-name all_run01 \
-        --batch-size 2 \
+        --batch-size 1 \
+        --num-workers 4 \
         --overwrite
 
 Stage2 text-CFG configs live in ``openpi.training_stage2.config`` and should be launched with
@@ -238,11 +241,6 @@ def train_step(
             shape=observation.tokenized_prompt_mask.shape[:-1],
         )
         uncond_prompt_mask = observation.token_loss_mask.astype(jnp.bool_)
-        compared_prompt_mask = jnp.logical_or(observation.tokenized_prompt_mask, uncond_prompt_mask)
-        different_tokens = jnp.logical_and(
-            observation.tokenized_prompt != observation.token_ar_mask.astype(observation.tokenized_prompt.dtype),
-            compared_prompt_mask,
-        )
         info.update(
             {
                 "text_cfg/text_dropout_fraction": jnp.mean(drop.astype(jnp.float32)),
@@ -252,9 +250,6 @@ def train_step(
                 ),
                 "text_cfg/uncond_prompt_tokens_mean": jnp.mean(
                     jnp.sum(uncond_prompt_mask, axis=-1).astype(jnp.float32)
-                ),
-                "text_cfg/cond_uncond_different_tokens_mean": jnp.mean(
-                    jnp.sum(different_tokens, axis=-1).astype(jnp.float32)
                 ),
             }
         )
